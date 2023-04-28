@@ -5,19 +5,38 @@ import os.path
 import io
 import google.auth
 import pickle
+import numpy as np
+import requests
 
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+
 from dotenv import dotenv_values
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+
+'''
+TODO:
+-- add restrictions on the size of the uploaded file
+-- in download func: show candidates to download(with different extension)
+-- ability to upload .jpg and other(maybe)
+-- BotFather: add inline help for command
+'''
+
+#last command
+last_command = [' ']
+
+#len of comand
+download_comand_len = len('/download ')
+upload_comand_len = len('/upload')
 
 config = dotenv_values(".env")
 allowed_extensions = ['pdf', 'jpg']
+MimeTypes = ['application/pdf', 'image/jpeg']
 folder_id = '1_dMZ7eMrTfECHJ3W6N4owefXNqYaGpmM'
 
 logging.basicConfig(
@@ -61,64 +80,36 @@ def Create_Service(client_secret_file, api_name, api_version, *scopes):
         print(e)
         return None
 
+async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    file = open('./server/help_list.txt')
+    help_text = file.read()
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=help_text)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="I'm a bot, please talk to me!")
+    text = update.message.text
+    last_command[0] = text
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f'Hello {update.effective_user.first_name}, this is a bot for working with Google drive. For more information, write /help.')
 
 async def hello(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    last_command[0] = text
     await update.message.reply_text(f'Hello {update.effective_user.first_name}')
 
 async def show_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # If modifying these scopes, delete the file token.json.
-    SCOPES = ['https://www.googleapis.com/auth/drive.metadata.readonly']
-
     """Shows basic usage of the Drive v3 API.
-    Prints the names and ids of the first 10 files the user has access to.
+    Prints the names of files the user has access to.
     """
-    creds = None
-    # The file token.json stores the user's access and refresh tokens, and is
-    # created automatically when the authorization flow completes for the first
-    # time.
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-    # If there are no (valid) credentials available, let the user log in.
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                'credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        # Save the credentials for the next run
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
+    text = update.message.text
+    last_command[0] = text
+    files = search_file()
+    for name in files:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=name)
 
-    try:
-        service = build('drive', 'v3', credentials=creds)
-
-        # Call the Drive v3 API
-        results = service.files().list(
-            pageSize=10, fields="nextPageToken, files(id, name)").execute()
-        items = results.get('files', [])
-
-        if not items:
-            print('No files found.')
-            return
-        print('Files:')
-        for item in items:
-            extension = item['name'].split('.')
-            if(len(extension) > 1):
-                if(extension[1] in allowed_extensions):
-                    await context.bot.send_message(chat_id=update.effective_chat.id, text=item.get('name'))
-            print(u'{0} ({1})'.format(item['name'], item['id']))
-    except HttpError as error:
-        # TODO(developer) - Handle errors from drive API.
-        print(f'An error occurred: {error}')
-
-def download_file(real_file_id):
+def download_file(real_file_id, file_name):
     """Downloads a file
     Args:
         real_file_id: ID of the file to download
-    Returns : IO object with location.
+        file_name: name of download file
     """
 
     CLIENT_SECRET_FILE = 'credentials.json'
@@ -126,7 +117,7 @@ def download_file(real_file_id):
     API_VERSION = 'v3'
     SCOPES = ['https://www.googleapis.com/auth/drive']
 
-    file_name = 'book.pdf'
+    write_file_name = 'book.pdf'
 
     try:
         service = Create_Service(CLIENT_SECRET_FILE, API_NAME, API_VERSION, SCOPES)
@@ -141,30 +132,35 @@ def download_file(real_file_id):
         while done is False:
             status, done = downloader.next_chunk()
             print(F'Download {int(status.progress() * 100)}.')
-        
-        name = 'convex.pdf'
 
         file.seek(0)
 
-        with open(os.path.join('./server', file_name), 'wb') as f:
+        with open(os.path.join('./server', write_file_name), 'wb') as f:
             f.write(file.read())
-            os.rename(os.path.join('./server', file_name), os.path.join('./server', name))
+            os.rename(os.path.join('./server', write_file_name), os.path.join('./server', file_name))
             f.close()
 
     except HttpError as error:
         print(F'An error occurred: {error}')
         file = None
 
-    return name
-
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    file_id = text.split(' ')[1]
-    file_name = download_file(file_id)
+    last_command[0] = text
+    input_name = text[download_comand_len : ]
+    files_list = search_file()
+    for name in files_list:
+        if(input_name in name):
+            file_id = files_list[name]
+            file_name = name
+            break
+
+    download_file(file_id, file_name)
     await context.bot.send_document(chat_id=update.effective_chat.id, document=open(f'./server/{file_name}', 'rb'))
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    last_command[0] = text
     file_name = text[8 :]
     print(file_name)
     files = search_file()
@@ -173,6 +169,96 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="The file does not exist.")
 
+def upload_file(file_name, extension):
+    CLIENT_SECRET_FILE = 'credentials.json'
+    API_NAME = 'drive'
+    API_VERSION = 'v3'
+    SCOPES = ['https://www.googleapis.com/auth/drive']
+
+    is_download = False
+
+    try:
+        service = Create_Service(CLIENT_SECRET_FILE, API_NAME, API_VERSION, SCOPES)
+
+        mime_type = ''
+        file_metadate = {}
+
+        if(extension == '.pdf'):
+            mime_type = 'application/pdf'
+        if(extension == '.jpg'):
+            mime_type = 'image/jpeg'
+
+        file_metadate = {
+                'name': file_name,
+                'parents': [folder_id]
+            }
+
+        if(mime_type in MimeTypes):
+            media = MediaFileUpload(os.path.join('./server/users', file_name), mimetype=mime_type)
+            service.files().create(body = file_metadate, media_body = media, fields = 'id').execute()
+            is_download = True
+
+    except HttpError as error:
+        print(F'An error occurred: {error}')
+
+    return is_download
+
+async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    last_command[0] = text
+    if(last_command[0][:upload_comand_len] == '/upload' and len(last_command[0]) > upload_comand_len):
+        await context.bot.send_message(chat_id=update.effective_chat.id, text='Upload your file:')
+    else:
+        error_text = 'Something went wrong. Perhaps you forgot to write the file name?'
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=error_text)
+
+async def file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    write_file_name = 'file.pdf'
+
+    file_id = update.message.document.file_id
+    file = await context.bot.get_file(file_id)
+    filename, extension = os.path.splitext(file.file_path)
+    print(file)
+
+    await file.download_to_drive('book')
+    if(last_command[0][:upload_comand_len] == '/upload' and len(last_command[0]) > upload_comand_len):
+        file_name = last_command[0][upload_comand_len + 1 :] + extension
+        URL = file.file_path
+        response = requests.get(URL)
+        with open(os.path.join('./server/users', write_file_name), 'wb') as f:
+            f.write(response.content)
+            os.rename(os.path.join('./server/users', write_file_name), os.path.join('./server/users', file_name))
+            f.close()
+        is_download = upload_file(file_name, extension)
+        if(is_download):
+            await context.bot.send_message(chat_id=update.effective_chat.id, text='Your book is uploaded')
+        else:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text='Something went wrong!')
+    
+    last_command[0] = ' '
+
+async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    write_file_name = 'photo.jpg'
+
+    photo_file = await update.message.photo[-1].get_file()
+    await photo_file.download_to_drive("user_photo.jpg")
+    filename, extension = os.path.splitext(photo_file.file_path)
+
+    if(last_command[0][:upload_comand_len] == '/upload' and len(last_command[0]) > upload_comand_len):
+        file_name = last_command[0][upload_comand_len + 1 :] + extension
+        URL = photo_file.file_path
+        response = requests.get(URL)
+        with open(os.path.join('./server/users', write_file_name), 'wb') as f:
+            f.write(response.content)
+            os.rename(os.path.join('./server/users', write_file_name), os.path.join('./server/users', file_name))
+            f.close()
+        is_download = upload_file(file_name, extension)
+        if(is_download):
+            await context.bot.send_message(chat_id=update.effective_chat.id, text='Your photo is uploaded')
+        else:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text='Something went wrong!')
+    
+    last_command[0] = ' '
 
 def search_file():
     """Search file in drive location
@@ -220,14 +306,20 @@ if __name__ == '__main__':
     
     start_handler = CommandHandler('start', start)
     hello_handler = CommandHandler('hello', hello)
+    help_handler = CommandHandler('help', help)
     show_files_handler = CommandHandler('show_files', show_files)
     download_handler = CommandHandler('download', download)
     search_handler = CommandHandler('search', search)
+    upload_handler = CommandHandler('upload', upload)
 
     application.add_handler(start_handler)
     application.add_handler(hello_handler)
+    application.add_handler(help_handler)
     application.add_handler(show_files_handler)
     application.add_handler(download_handler)
     application.add_handler(search_handler)
+    application.add_handler(upload_handler)
+    application.add_handler(MessageHandler(filters.Document.PDF, file))
+    application.add_handler(MessageHandler(filters.PHOTO, photo))
     
     application.run_polling()
